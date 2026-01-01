@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ninja-fight</title>
+  <style>
+    :root{
+      --bg:#0b1220;
+      --panel:#0f1724;
+      --accent:#ff4d4d;
+      --ok:#4de67a;
+      --text:#e6eef6;
+      --muted:#96a0b3;
+    }
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+    body{
+      background: linear-gradient(180deg, #071021 0%, #0b1220 100%);
+      color:var(--text);
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:12px;
+      padding:18px;
+      box-sizing:border-box;
+    }
+    h1{margin:0;font-size:clamp(20px,3vw,34px);letter-spacing:1px}
+    #game-wrap{background:var(--panel);padding:12px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,0.6);}
+    canvas{display:block;background:#061018;border-radius:6px;max-width:100%;height:auto;}
+    #controls{margin-top:10px;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap}
+    button, .touch-btn{
+      background:linear-gradient(180deg,#1b2a3b,#14202b);
+      color:var(--text);
+      border:1px solid rgba(255,255,255,0.04);
+      padding:8px 12px;border-radius:8px;font-weight:600;cursor:pointer;
+    }
+    #instructions{color:var(--muted);font-size:13px;text-align:center;margin-top:6px;max-width:760px}
+    #overlay{
+      position:fixed;left:0;right:0;top:0;bottom:0;
+      display:flex;align-items:center;justify-content:center;
+      pointer-events:none;
+    }
+    #message{
+      pointer-events:auto;
+      background:rgba(3,6,10,0.8);border:1px solid rgba(255,255,255,0.06);
+      padding:20px 26px;border-radius:12px;color:var(--text);text-align:center;
+      box-shadow:0 10px 40px rgba(2,6,10,0.7)
+    }
+    .healthbar{height:10px;background:#133244;border-radius:6px;overflow:hidden;margin-top:6px}
+    .healthbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--ok),#78f2a5)}
+    /* touch controls for small screens */
+    #touch-controls{display:none;gap:8px}
+    .touch-btn{padding:12px 16px;border-radius:10px;font-size:16px}
+    @media (max-width:700px){
+      #touch-controls{display:flex}
+    }
+  </style>
+</head>
+<body>
+  <h1>ninja-fight</h1>
+  <div id="game-wrap">
+    <canvas id="game" width="900" height="420"></canvas>
+    <div id="controls">
+      <button id="restart">Restart</button>
+      <div id="touch-controls">
+        <button class="touch-btn" data-action="left">◀</button>
+        <button class="touch-btn" data-action="right">▶</button>
+        <button class="touch-btn" data-action="attack">Slash</button>
+      </div>
+    </div>
+    <div id="instructions">
+      Controls: Left / Right arrows or A / D to move. Space to attack. Defeat the enemy to win.
+    </div>
+  </div>
+
+  <div id="overlay" aria-hidden="true">
+    <div id="message" style="display:none"></div>
+  </div>
+
+  <script>
+  // Simple HTML5 canvas "ninja-fight" demo
+  (function(){
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    let W = canvas.width, H = canvas.height;
+    function resize(){
+      // keep fixed canvas logical size but scale for device pixel ratio
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const maxW = Math.min(window.innerWidth - 36, 1100);
+      const scale = maxW / W;
+      canvas.style.width = Math.floor(W * scale) + 'px';
+      canvas.style.height = Math.floor(H * scale) + 'px';
+      canvas.width = Math.floor(W * ratio);
+      canvas.height = Math.floor(H * ratio);
+      ctx.setTransform(ratio,0,0,ratio,0,0);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Game state
+    let running = true;
+    const player = {
+      x: 140, y: 300, w: 48, h: 64,
+      speed: 220, dir: 1,
+      attacking: false, attackTime: 0,
+      health: 100
+    };
+    const enemy = {
+      x: 620, y:300, w:52, h:66,
+      speed: 80, dir: -1,
+      health: 120, alive: true,
+      moveTimer: 0
+    };
+
+    const keys = {};
+    window.addEventListener('keydown', e=>{
+      keys[e.key.toLowerCase()] = true;
+      if(e.key === ' '){ e.preventDefault(); }
+    });
+    window.addEventListener('keyup', e=>{
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    // touch buttons
+    document.querySelectorAll('.touch-btn').forEach(btn=>{
+      btn.addEventListener('touchstart', e=>{
+        e.preventDefault();
+        const action = btn.dataset.action;
+        if(action === 'left') keys['arrowleft'] = true;
+        if(action === 'right') keys['arrowright'] = true;
+        if(action === 'attack') keys[' '] = true;
+      });
+      btn.addEventListener('touchend', e=>{
+        e.preventDefault();
+        const action = btn.dataset.action;
+        if(action === 'left') keys['arrowleft'] = false;
+        if(action === 'right') keys['arrowright'] = false;
+        if(action === 'attack') keys[' '] = false;
+      });
+    });
+
+    function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+    // HUD / overlay
+    const message = document.getElementById('message');
+    function showMessage(html){
+      message.innerHTML = html;
+      message.style.display = 'block';
+      document.getElementById('overlay').ariaHidden = 'false';
+    }
+    function hideMessage(){ message.style.display = 'none'; document.getElementById('overlay').ariaHidden = 'true'; }
+
+    // Restart button
+    document.getElementById('restart').addEventListener('click', ()=>{
+      reset();
+    });
+
+    function reset(){
+      player.x = 140; player.health = 100; player.attacking = false; player.attackTime = 0;
+      enemy.x = 620; enemy.health = 120; enemy.alive = true; enemy.dir = -1; enemy.moveTimer = 0;
+      running = true; hideMessage();
+      lastTime = performance.now();
+      loop(lastTime);
+    }
+
+    // Attack check
+    function tryAttack(){
+      // if not currently attacking, start attack
+      if(!player.attacking){
+        player.attacking = true;
+        player.attackTime = 0.28; // seconds of attack active
+      }
+    }
+
+    // Game loop
+    let lastTime = performance.now();
+    function loop(t){
+      const dt = Math.min(0.05, (t - lastTime) / 1000);
+      lastTime = t;
+      if(running) update(dt);
+      draw();
+      if(running) requestAnimationFrame(loop);
+    }
+
+    function update(dt){
+      // input
+      let move = 0;
+      if(keys['arrowleft'] || keys['a']) move -= 1;
+      if(keys['arrowright'] || keys['d']) move += 1;
+      if(keys[' ']) { tryAttack(); keys[' '] = false; } // single-tap attack
+
+      // player movement
+      player.x += move * player.speed * dt;
+      player.x = clamp(player.x, 20, 820 - player.w);
+
+      if(move !== 0) player.dir = move > 0 ? 1 : -1;
+
+      // attack timing
+      if(player.attacking){
+        player.attackTime -= dt;
+        if(player.attackTime <= 0){
+          player.attacking = false;
+          player.attackTime = 0;
+        }
+      }
+
+      // enemy AI: simple patrol + occasionally dash
+      enemy.moveTimer -= dt;
+      if(enemy.moveTimer <= 0){
+        enemy.moveTimer = 1 + Math.random() * 2;
+        enemy.dir = (player.x < enemy.x) ? -1 : 1;
+      }
+      // enemy moves toward player slowly
+      const desired = Math.sign(player.x - enemy.x);
+      enemy.x += desired * enemy.speed * dt * (enemy.alive ? 1 : 0);
+
+      // collision / attack resolution
+      // if player is attacking and enemy is in range, damage enemy once per attack
+      const dist = Math.abs((player.x + player.w/2) - (enemy.x + enemy.w/2));
+      const attackRange = 90;
+      if(player.attacking && player.attackTime > 0 && dist < attackRange && enemy.alive){
+        enemy.health -= 28; // damage per hit
+        enemy.health = Math.max(0, enemy.health);
+        // small knockback
+        enemy.x += player.dir * 18;
+        // make attack only hit once per attack window
+        player.attackTime = 0; // consumes the attack
+      }
+
+      // enemy hits player if close
+      if(enemy.alive && dist < 60){
+        // enemy attack cooldown via small probability
+        if(Math.random() < 0.02){
+          player.health -= 10;
+          player.health = Math.max(0, player.health);
+        }
+      }
+
+      // check deaths
+      if(enemy.health <= 0 && enemy.alive){
+        enemy.alive = false;
+        showMessage('<h2 style="margin:0;color:var(--ok)">You win!</h2><p style="color:var(--muted);margin:8px 0 0">Press Restart to play again.</p>');
+        running = false;
+      }
+      if(player.health <= 0 && running){
+        running = false;
+        showMessage('<h2 style="margin:0;color:var(--accent)">You were defeated</h2><p style="color:var(--muted);margin:8px 0 0">Press Restart to try again.</p>');
+      }
+    }
+
+    function draw(){
+      // clear
+      ctx.fillStyle = '#061018';
+      ctx.fillRect(0,0,900,420);
+
+      // background elements
+      drawBackground();
+
+      // ground
+      ctx.fillStyle = '#081522';
+      ctx.fillRect(0,360,900,60);
+
+      // draw player
+      drawNinja(player, '#4db8ff');
+
+      // draw enemy
+      drawNinja(enemy, '#ff6666');
+
+      // HUD
+      drawHUD();
+    }
+
+    function drawBackground(){
+      // simple subtle mountains / skyline
+      const g = ctx.createLinearGradient(0,0,0,420);
+      g.addColorStop(0,'#071021'); g.addColorStop(1,'#081522');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,900,360);
+
+      // moon
+      ctx.fillStyle = '#f6f9ff';
+      ctx.globalAlpha = 0.06;
+      ctx.beginPath(); ctx.arc(760,60,64,0,Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+    }
+
+    function drawNinja(ent, color){
+      const x = ent.x, y = ent.y, w = ent.w, h = ent.h;
+      // shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath(); ctx.ellipse(x + w/2, y + h + 6, w*0.6, 8, 0, 0, Math.PI*2); ctx.fill();
+
+      // body
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, w, h);
+      // headband
+      ctx.fillStyle = '#111';
+      ctx.fillRect(x+6, y+6, w-12, 12);
+
+      // eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(x + (ent === player ? 30 : 18), y+12, 6, 6);
+
+      // attack slash if attacking
+      if(ent === player && player.attacking){
+        ctx.save();
+        ctx.translate(x + w/2, y + h/2);
+        ctx.rotate(player.dir * -0.5);
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.fillRect(20, -10, 80, 22);
+        ctx.restore();
+      }
+    }
+
+    function drawHUD(){
+      // player info left
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.fillRect(12,12,230,84);
+      ctx.fillStyle = '#cde6ff';
+      ctx.font = '16px system-ui,Arial';
+      ctx.fillText('Player', 22, 34);
+
+      // health text
+      ctx.fillStyle = '#e6eef6';
+      ctx.font = 'bold 14px system-ui,Arial';
+      ctx.fillText(player.health + ' / 100', 22, 58);
+
+      // health bar
+      const pw = 190, ph = 12;
+      const px = 22, py = 64;
+      ctx.fillStyle = '#082533'; ctx.fillRect(px, py, pw, ph);
+      ctx.fillStyle = '#4de67a'; ctx.fillRect(px, py, pw * (player.health / 100), ph);
+
+      // enemy info right
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.fillRect(900-242,12,230,84);
+      ctx.fillStyle = '#ffd6d6';
+      ctx.font = '16px system-ui,Arial';
+      ctx.fillText('Enemy', 900-232, 34);
+
+      ctx.fillStyle = '#e6eef6';
+      ctx.font = 'bold 14px system-ui,Arial';
+      ctx.fillText(enemy.health + ' / 120', 900-232, 58);
+
+      // enemy bar
+      const ex = 900-232, ey = 64, ew = 190, eh = 12;
+      ctx.fillStyle = '#2b1010'; ctx.fillRect(ex, ey, ew, eh);
+      const pct = Math.max(0, enemy.health / 120);
+      ctx.fillStyle = '#ff7b7b'; ctx.fillRect(ex, ey, ew * pct, eh);
+    }
+
+    // start
+    lastTime = performance.now();
+    loop(lastTime);
+
+    // expose for debug
+    window.ninjaFight = { reset };
+  })();
+  </script>
+</body>
+</html>
